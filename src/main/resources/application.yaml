@@ -13,6 +13,9 @@ spring:
     schemas: orders
 
   jpa:
+    # sem sessao aberta durante a requisicao inteira: a conexao volta ao pool logo apos
+    # cada consulta (o GET /orders/{id} chama o Exchange depois de ler o banco)
+    open-in-view: false
     properties:
       hibernate:
         default_schema: orders
