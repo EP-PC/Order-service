@@ -29,13 +29,15 @@ import org.springframework.test.web.servlet.MockMvc;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
+import store.exchange.ExchangeClient;
+import store.exchange.ExchangeOut;
 import store.product.ProductController;
 import store.product.ProductOut;
 
 /**
  * Teste de integracao da camada HTTP: requisicoes de verdade (MockMvc) passando pelo
  * OrderResource -> OrderService (REAL) -> OrderExceptionHandler, com mock so nas pontas
- * (banco e Product). Cobre rotas, header id-account, status, Location e formato do JSON.
+ * (banco, Product e Exchange). Cobre rotas, header id-account, status, Location e formato do JSON.
  */
 @WebMvcTest(OrderResource.class)
 @Import(OrderService.class)
@@ -65,6 +67,9 @@ class OrderResourceTest {
 
     @MockitoBean
     private ProductController productController;
+
+    @MockitoBean
+    private ExchangeClient exchangeClient;
 
     // ---------- POST /orders ----------
 
@@ -176,13 +181,47 @@ class OrderResourceTest {
             .andExpect(status().isUnauthorized());
     }
 
-    // PLACEHOLDER: troca na Etapa 4, quando o Exchange estiver integrado
+    @Test
+    void getOrderInBrlReturnsConvertedTotals() throws Exception {
+        when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
+        when(exchangeClient.rate("USD", "BRL", ACCOUNT)).thenReturn(ResponseEntity.ok(ExchangeOut.builder()
+            .sell(new BigDecimal("6.00")).buy(new BigDecimal("5.90"))
+            .date("2026-11-18 12:00:00").idAccount(ACCOUNT).build()));
+
+        // mesmo JSON do exemplo ?currency=BRL do enunciado
+        mvc.perform(get("/orders/{id}", ORDER_ID).param("currency", "BRL").header("id-account", ACCOUNT))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.id").value(ORDER_ID))
+            .andExpect(jsonPath("$.date").value("2025-09-01T12:30:00"))
+            .andExpect(jsonPath("$.currency").value("BRL"))
+            .andExpect(jsonPath("$.items[0].product.id").value(P1))
+            .andExpect(jsonPath("$.items[0].quantity").value(2))
+            .andExpect(jsonPath("$.items[0].total").value(121.44))
+            .andExpect(jsonPath("$.items[1].total").value(37.2))
+            .andExpect(jsonPath("$.total").value(158.64));
+    }
+
     @Test
     void getOrderWithUnsupportedCurrencyReturns422() throws Exception {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
+        when(exchangeClient.rate("USD", "XYZ", ACCOUNT))
+            .thenThrow(feignError(404, "http://exchange:8080/exchange/USD/XYZ", "ExchangeClient#rate(String,String,String)"));
+
+        mvc.perform(get("/orders/{id}", ORDER_ID).param("currency", "XYZ").header("id-account", ACCOUNT))
+            .andExpect(status().isUnprocessableContent())
+            .andExpect(jsonPath("$.status").value(422))
+            .andExpect(jsonPath("$.message").value("Currency not supported: XYZ"));
+    }
+
+    @Test
+    void getOrderWithExchangeDownReturns503() throws Exception {
+        when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
+        when(exchangeClient.rate("USD", "BRL", ACCOUNT))
+            .thenThrow(feignError(503, "http://exchange:8080/exchange/USD/BRL", "ExchangeClient#rate(String,String,String)"));
 
         mvc.perform(get("/orders/{id}", ORDER_ID).param("currency", "BRL").header("id-account", ACCOUNT))
-            .andExpect(status().isUnprocessableContent());
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.message").value("Exchange service unavailable"));
     }
 
     @Test
@@ -200,12 +239,15 @@ class OrderResourceTest {
     }
 
     private static FeignException feignError(int status) {
-        Request request = Request.create(Request.HttpMethod.GET, "http://product:8080/products/" + P1,
-            Map.of(), null, StandardCharsets.UTF_8, null);
+        return feignError(status, "http://product:8080/products/" + P1, "ProductController#findById(String)");
+    }
+
+    private static FeignException feignError(int status, String url, String methodKey) {
+        Request request = Request.create(Request.HttpMethod.GET, url, Map.of(), null, StandardCharsets.UTF_8, null);
         Response response = Response.builder()
             .status(status).reason("error").request(request).headers(Map.of())
             .build();
-        return FeignException.errorStatus("ProductController#findById(String)", response);
+        return FeignException.errorStatus(methodKey, response);
     }
 
     private static OrderModel storedOrder() {
