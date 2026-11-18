@@ -10,12 +10,12 @@ Pré-requisitos: Java 25, Maven 3.9+ e os dois contratos no `~/.m2`
 (`mvn install` nos repos `Order` e `Product`, ou o `api/build.sh` do store-pma).
 
 ```bash
-mvn clean package          # compila e roda os 33 testes
-docker compose up --build  # Postgres + order na 8080
+mvn clean package          # compila e roda os 42 testes
+docker compose up --build  # Postgres + Redis + order na 8080
 ```
 
-O `compose.yaml` deste repo sobe só o Postgres e o order (o Flyway cria o schema `orders`
-na primeira subida). Sem o product de pé, o `POST /orders` com itens válidos responde 503.
+O `compose.yaml` deste repo sobe só o Postgres, o Redis do cache e o order (o Flyway cria o
+schema `orders` na primeira subida). Sem o product de pé, o `POST /orders` com itens válidos responde 503.
 Para o fluxo completo (gateway + auth + account + product + order), use o compose do
 [store-pma](https://github.com/EP-PC/store-pma). Os dois usam `name: store` e a porta 8080:
 deixe só um de pé por vez e derrube **sem** `-v`.
@@ -97,6 +97,43 @@ O contrato completo do Exchange (path, resposta, erros) está no
 Os dois clientes Feign têm timeout de **2 s** para conectar e **5 s** para ler
 (`application.yaml`): o padrão do Feign esperaria até 60 s, segurando a requisição do usuário.
 
+## Bottleneck 1: cache com Redis
+
+**Problema.** Toda requisição do Order depende de outro serviço pela rede: o `POST /orders` faz
+uma chamada ao Product **por item** (preço e existência do produto), e o
+`GET /orders/{id}?currency=` faz uma chamada ao Exchange, que por sua vez consulta uma API de
+câmbio externa (centenas de milissegundos). Pedidos seguidos repetem as mesmas consultas.
+
+**Solução.** Cache do Spring (`@Cacheable`) com um Redis próprio do order (`order-redis`):
+
+| Cache | Chave | Valor | TTL |
+|---|---|---|---|
+| `products` | `order:products::<idProduct>` | produto (JSON) | 60 s |
+| `rates` | `order:rates::USD-<moeda>` | taxa `sell` | 60 s |
+
+- A cotação é a mesma para todos os usuários: a chave não inclui o `id-account`, então a
+  consulta de um usuário aproveita a de outro.
+- Só entra no cache resposta válida: produto inexistente (404), corpo vazio, taxa inválida e
+  erros não são guardados (um produto criado depois aparece na consulta seguinte).
+- Até 60 s de defasagem no preço/cotação é o custo aceito (TTL configurável em
+  `store.order.cache.ttl`).
+- **Redis fora do ar não derruba o order**: o `CacheErrorHandler` (`CacheConfig`) registra um
+  aviso e a requisição segue sem cache, chamando o Product/Exchange direto.
+- O `@Cacheable` fica em classes próprias (`ProductLookup`, `ExchangeLookup`) porque funciona
+  via proxy do Spring: uma chamada de dentro do próprio `OrderService` não passaria pelo cache.
+
+**Resultado medido** (compose local, 30 requisições seguidas de cada tipo; Exchange simulado com
+300 ms de latência, como uma API externa; mesmo código com `SPRING_CACHE_TYPE=none` x Redis):
+
+| Requisição | Sem cache (p50 / média) | Com cache (p50 / média) | Chamadas externas |
+|---|---|---|---|
+| `GET /orders/{id}?currency=BRL` | 335 ms / 357 ms | **10 ms / 67 ms** | Exchange: 30 → **1** |
+| `POST /orders` (2 itens) | 19 ms / 33 ms | **11 ms / 18 ms** | Product: 60 → **2** |
+
+No Redis: 87 hits e 3 misses (2 produtos + 1 cotação). A média com cache inclui a primeira
+requisição (cache vazio + aquecimento da JVM). Com o Redis desligado, as mesmas requisições
+continuaram respondendo 200/201 (sem cache, ~0,5 s a mais pelo timeout do Redis).
+
 ## Banco
 
 Schema `orders` (Flyway, `src/main/resources/db/migration`):
@@ -121,13 +158,15 @@ mvn test
 |---|---|---|
 | `OrderServiceTest` (20) | unitário (Mockito, sem Spring) | criação, validações, produto inexistente, Product/Exchange fora, 401, listagem por dono, 404 de outro usuário, conversão (taxa `sell`, arredondamento, normalização, 4xx → 422, taxa inválida) |
 | `OrderResourceTest` (13) | integração HTTP (`@WebMvcTest` + MockMvc, `OrderService` real) | rotas, header `id-account`, status, `Location`, formato do JSON (igual ao enunciado), JSON malformado |
+| `LookupCacheTest` (9) | contexto Spring com cache ligado (em memória) | bottleneck 1: mesma consulta = 1 chamada HTTP, cotação compartilhada entre usuários, 404/corpo vazio/taxa inválida/erros fora do cache, serialização JSON do Redis |
 
-Banco, Product e Exchange são mocks: os testes não precisam de Postgres nem de rede, e rodam
-no Jenkins.
+Banco, Redis, Product e Exchange são mocks ou substituídos em memória: os testes não precisam
+de Postgres, Redis nem rede, e rodam no Jenkins.
 
 ## Kubernetes
 
-Manifestos em `k8s/k8s.yaml` (Deployment + Service `ClusterIP` 8080, nome `order`). Pré-requisito:
+Manifestos em `k8s/k8s.yaml`: Deployment + Service `ClusterIP` 8080 com o nome `order`, e o
+Redis do cache (`order-redis`, `ClusterIP` 6379, `maxmemory` 96 MB com descarte LRU). Pré-requisito:
 o Postgres do repo root já aplicado (`postgres-configmap`, `postgres-secrets` e Service `postgres`).
 O order não tem segredo próprio: usa só as credenciais do banco.
 
