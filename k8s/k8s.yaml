@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order
+  template:
+    metadata:
+      labels:
+        app: order
+    spec:
+      containers:
+          - name: order
+            # TROCAR SEU_USUARIO_DOCKERHUB pelo usuario do Docker Hub; a tag e o commit do codigo
+            image: SEU_USUARIO_DOCKERHUB/order:7d48eb9
+            imagePullPolicy: Always
+            ports:
+              - containerPort: 8080
+            # sem probe, o pod novo seria dado como pronto assim que o container subisse e o antigo
+            # cairia: 503 nos segundos de boot do Spring. A 8080 so abre no fim da inicializacao
+            # (depois do Flyway/contexto), entao o check TCP basta (sem actuator). Igual ao product.
+            readinessProbe:
+              tcpSocket:
+                port: 8080
+              initialDelaySeconds: 20
+              periodSeconds: 5
+              failureThreshold: 6
+            resources:
+              requests:
+                memory: "256Mi"
+                cpu: "250m"
+              limits:
+                memory: "512Mi"
+                cpu: "500m"
+            env:
+
+              - name: DATABASE_HOST
+                valueFrom:
+                  configMapKeyRef:
+                    name: postgres-configmap
+                    key: POSTGRES_HOST
+
+              - name: DATABASE_DB
+                valueFrom:
+                  configMapKeyRef:
+                    name: postgres-configmap
+                    key: POSTGRES_DB
+
+              - name: DATABASE_PORT
+                value: "5432"
+
+              - name: DATABASE_USERNAME
+                valueFrom:
+                  secretKeyRef:
+                    name: postgres-secrets
+                    key: POSTGRES_USER
+
+              - name: DATABASE_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: postgres-secrets
+                    key: POSTGRES_PASSWORD
+
+              # heap de ate 50% do limite (256 MB de 512Mi); sobra para metaspace/threads
+              - name: JAVA_TOOL_OPTIONS
+                value: "-XX:MaxRAMPercentage=50"
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: order
+spec:
+  selector:
+    app: order
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
