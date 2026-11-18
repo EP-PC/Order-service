@@ -12,6 +12,22 @@ spring:
     baseline-on-migrate: true
     schemas: orders
 
+  # Bottleneck 1 (caching): Redis proprio do order (ver CacheConfig).
+  # Timeouts curtos: com o Redis fora do ar, o order segue sem cache (CacheErrorHandler)
+  # e cada requisicao perde no maximo ~0,5 s tentando, em vez de travar.
+  data:
+    redis:
+      host: ${REDIS_HOST:order-redis}
+      port: ${REDIS_PORT:6379}
+      connect-timeout: 500ms
+      timeout: 500ms
+
+  cache:
+    type: redis
+    redis:
+      # contadores de hit/miss do cache (aparecem nas metricas da observabilidade)
+      enable-statistics: true
+
   cloud:
     openfeign:
       client:

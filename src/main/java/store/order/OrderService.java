@@ -15,9 +15,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import feign.FeignException;
 import lombok.extern.slf4j.Slf4j;
-import store.exchange.ExchangeClient;
-import store.exchange.ExchangeOut;
-import store.product.ProductController;
 import store.product.ProductOut;
 
 @Slf4j
@@ -33,11 +30,12 @@ public class OrderService {
     @Autowired
     private OrderRepository orderRepository;
 
+    // consultas ao Product e ao Exchange com cache no Redis (bottleneck 1; ver CacheConfig)
     @Autowired
-    private ProductController productController;   // cliente Feign do contrato store:product
+    private ProductLookup productLookup;
 
     @Autowired
-    private ExchangeClient exchangeClient;         // cliente Feign do Exchange (Python)
+    private ExchangeLookup exchangeLookup;
 
     // Sem @Transactional de proposito: as chamadas ao Product (HTTP) acontecem antes,
     // sem segurar conexao do banco; o save() abre a propria transacao e grava pedido + itens.
@@ -125,20 +123,21 @@ public class OrderService {
     // dolar com outra moeda, o cliente precisa COMPRAR dolar, e a casa de cambio VENDE.
     // O id-account e repassado porque o Exchange so atende usuario logado.
     private BigDecimal rate(String to, String idAccount) {
-        ExchangeOut exchange;
+        BigDecimal sell;
         try {
-            exchange = exchangeClient.rate(USD, to, idAccount).getBody();
+            sell = exchangeLookup.sell(USD, to, idAccount);
         } catch (FeignException.BadRequest | FeignException.NotFound | FeignException.UnprocessableEntity e) {
             // o Exchange nao conhece a moeda
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Currency not supported: " + to);
         } catch (FeignException e) {
             throw translate(e, "Exchange");
         }
-        if (exchange == null || exchange.sell() == null || exchange.sell().signum() <= 0) {
-            log.error("Invalid exchange rate for USD -> {}: {}", to, exchange);
+        // null = resposta invalida do Exchange (sem body, sell ausente ou <= 0)
+        if (sell == null) {
+            log.error("Invalid exchange rate for USD -> {}", to);
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Invalid exchange rate");
         }
-        return exchange.sell();
+        return sell;
     }
 
     // id-account vem do Gateway (depois de validar o JWT); sem ele = usuario nao logado
@@ -180,7 +179,7 @@ public class OrderService {
     private ProductOut findProduct(String idProduct) {
         ProductOut product;
         try {
-            product = productController.findById(idProduct).getBody();
+            product = productLookup.find(idProduct);
         } catch (FeignException.NotFound e) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Product not found: " + idProduct);
         } catch (FeignException e) {
