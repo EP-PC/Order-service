@@ -22,20 +22,17 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.server.ResponseStatusException;
 
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
-import store.exchange.ExchangeClient;
-import store.exchange.ExchangeOut;
-import store.product.ProductController;
 import store.product.ProductOut;
 
 /**
  * Teste unitario do OrderService: sem Spring, sem banco, sem rede.
- * O repositorio e os clientes Feign do Product e do Exchange sao mocks (Mockito).
+ * O repositorio e as consultas ao Product e ao Exchange (ProductLookup/ExchangeLookup) sao mocks.
+ * O cache em si e testado no LookupCacheTest.
  */
 @ExtendWith(MockitoExtension.class)
 class OrderServiceTest {
@@ -50,10 +47,10 @@ class OrderServiceTest {
     private OrderRepository orderRepository;
 
     @Mock
-    private ProductController productController;
+    private ProductLookup productLookup;
 
     @Mock
-    private ExchangeClient exchangeClient;
+    private ExchangeLookup exchangeLookup;
 
     @InjectMocks
     private OrderService orderService;
@@ -62,8 +59,8 @@ class OrderServiceTest {
 
     @Test
     void createComputesTotalsWithProductPricesAndSavesForCurrentAccount() {
-        when(productController.findById(P1)).thenReturn(product(P1, "10.12"));
-        when(productController.findById(P2)).thenReturn(product(P2, "0.62"));
+        when(productLookup.find(P1)).thenReturn(product(P1, "10.12"));
+        when(productLookup.find(P2)).thenReturn(product(P2, "0.62"));
         when(orderRepository.save(any(OrderModel.class))).thenAnswer(inv -> inv.getArgument(0));
 
         Order created = orderService.create(ACCOUNT, order(item(P1, 2), item(P2, 10)));
@@ -82,7 +79,7 @@ class OrderServiceTest {
 
     @Test
     void createWithUnknownProductReturns400AndDoesNotSave() {
-        when(productController.findById(P1)).thenThrow(feignError(404));
+        when(productLookup.find(P1)).thenThrow(feignError(404));
 
         assertStatus(() -> orderService.create(ACCOUNT, order(item(P1, 1))), HttpStatus.BAD_REQUEST);
         verify(orderRepository, never()).save(any());
@@ -91,7 +88,7 @@ class OrderServiceTest {
     @Test
     void createWithEmptyProductBodyReturns400() {
         // ex.: idProduct "health-check" casa GET /products/health-check (200 sem body)
-        when(productController.findById("health-check")).thenReturn(ResponseEntity.ok().build());
+        when(productLookup.find("health-check")).thenReturn(null);
 
         assertStatus(() -> orderService.create(ACCOUNT, order(item("health-check", 1))), HttpStatus.BAD_REQUEST);
         verify(orderRepository, never()).save(any());
@@ -99,7 +96,7 @@ class OrderServiceTest {
 
     @Test
     void createWithProductServiceDownReturns503() {
-        when(productController.findById(P1)).thenThrow(feignError(503));
+        when(productLookup.find(P1)).thenThrow(feignError(503));
 
         assertStatus(() -> orderService.create(ACCOUNT, order(item(P1, 1))), HttpStatus.SERVICE_UNAVAILABLE);
         verify(orderRepository, never()).save(any());
@@ -110,7 +107,7 @@ class OrderServiceTest {
         assertStatus(() -> orderService.create(ACCOUNT, Order.builder().items(List.of()).build()), HttpStatus.BAD_REQUEST);
         assertStatus(() -> orderService.create(ACCOUNT, Order.builder().build()), HttpStatus.BAD_REQUEST);
         assertStatus(() -> orderService.create(ACCOUNT, null), HttpStatus.BAD_REQUEST);
-        verify(productController, never()).findById(anyString());
+        verify(productLookup, never()).find(anyString());
     }
 
     @Test
@@ -121,14 +118,14 @@ class OrderServiceTest {
         assertStatus(() -> orderService.create(ACCOUNT, order(item(" ", 1))), HttpStatus.BAD_REQUEST);
         // valida todos os itens antes da primeira chamada ao Product
         assertStatus(() -> orderService.create(ACCOUNT, order(item(P1, 1), item(P2, 0))), HttpStatus.BAD_REQUEST);
-        verify(productController, never()).findById(anyString());
+        verify(productLookup, never()).find(anyString());
     }
 
     @Test
     void createWithoutAccountReturns401() {
         assertStatus(() -> orderService.create(null, order(item(P1, 1))), HttpStatus.UNAUTHORIZED);
         assertStatus(() -> orderService.create(" ", order(item(P1, 1))), HttpStatus.UNAUTHORIZED);
-        verify(productController, never()).findById(anyString());
+        verify(productLookup, never()).find(anyString());
     }
 
     // ---------- GET /orders ----------
@@ -164,7 +161,7 @@ class OrderServiceTest {
         assertThat(order.items()).hasSize(2);
         assertThat(order.items().get(0).total()).isEqualByComparingTo("20.24");
         assertThat(order.total()).isEqualByComparingTo("26.44");
-        verify(exchangeClient, never()).rate(any(), any(), any());   // USD: sem chamada ao Exchange
+        verify(exchangeLookup, never()).sell(any(), any(), any());   // USD: sem chamada ao Exchange
     }
 
     @Test
@@ -175,7 +172,7 @@ class OrderServiceTest {
         assertStatus(() -> orderService.findById(OTHER_ACCOUNT, ORDER_ID, null), HttpStatus.NOT_FOUND);
         // com moeda tambem: o 404 vem antes, sem chamar o Exchange
         assertStatus(() -> orderService.findById(OTHER_ACCOUNT, ORDER_ID, "BRL"), HttpStatus.NOT_FOUND);
-        verify(exchangeClient, never()).rate(any(), any(), any());
+        verify(exchangeLookup, never()).sell(any(), any(), any());
     }
 
     @Test
@@ -189,7 +186,7 @@ class OrderServiceTest {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
 
         assertThat(orderService.findById(ACCOUNT, ORDER_ID, "usd").currency()).isEqualTo("USD");
-        verify(exchangeClient, never()).rate(any(), any(), any());
+        verify(exchangeLookup, never()).sell(any(), any(), any());
     }
 
     // ---------- GET /orders/{id}?currency= (Exchange) ----------
@@ -198,7 +195,7 @@ class OrderServiceTest {
     void findByIdWithCurrencyConvertsWithSellRateAndForwardsIdAccount() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
         // stub so para (USD, BRL, ACCOUNT): se o Order nao repassar o id-account, o teste falha
-        when(exchangeClient.rate("USD", "BRL", ACCOUNT)).thenReturn(rate("6.00", "5.90"));
+        when(exchangeLookup.sell("USD", "BRL", ACCOUNT)).thenReturn(new BigDecimal("6.00"));
 
         Order order = orderService.findById(ACCOUNT, ORDER_ID, "BRL");
 
@@ -214,7 +211,7 @@ class OrderServiceTest {
     @Test
     void conversionRoundsEachItemAndTotalIsTheSumOfConvertedItems() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
-        when(exchangeClient.rate("USD", "BRL", ACCOUNT)).thenReturn(rate("5.4321", "5.4000"));
+        when(exchangeLookup.sell("USD", "BRL", ACCOUNT)).thenReturn(new BigDecimal("5.4321"));
 
         Order order = orderService.findById(ACCOUNT, ORDER_ID, "BRL");
 
@@ -228,7 +225,7 @@ class OrderServiceTest {
     @Test
     void currencyIsTrimmedAndUppercasedBeforeCallingExchange() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
-        when(exchangeClient.rate("USD", "EUR", ACCOUNT)).thenReturn(rate("0.92", "0.90"));
+        when(exchangeLookup.sell("USD", "EUR", ACCOUNT)).thenReturn(new BigDecimal("0.92"));
 
         assertThat(orderService.findById(ACCOUNT, ORDER_ID, " eur ").currency()).isEqualTo("EUR");
     }
@@ -237,7 +234,7 @@ class OrderServiceTest {
     void currencyUnknownToExchangeReturns422() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
         // qualquer um dos 4xx "moeda invalida" do Exchange vira 422 no Order
-        when(exchangeClient.rate("USD", "XYZ", ACCOUNT))
+        when(exchangeLookup.sell("USD", "XYZ", ACCOUNT))
             .thenThrow(exchangeError(404), exchangeError(422), exchangeError(400));
 
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "XYZ"), HttpStatus.UNPROCESSABLE_CONTENT);
@@ -252,13 +249,13 @@ class OrderServiceTest {
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "REAL"), HttpStatus.UNPROCESSABLE_CONTENT);
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "BR1"), HttpStatus.UNPROCESSABLE_CONTENT);
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "B"), HttpStatus.UNPROCESSABLE_CONTENT);
-        verify(exchangeClient, never()).rate(any(), any(), any());
+        verify(exchangeLookup, never()).sell(any(), any(), any());
     }
 
     @Test
     void exchangeDownReturns503() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
-        when(exchangeClient.rate("USD", "BRL", ACCOUNT)).thenThrow(exchangeError(503));
+        when(exchangeLookup.sell("USD", "BRL", ACCOUNT)).thenThrow(exchangeError(503));
 
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "BRL"), HttpStatus.SERVICE_UNAVAILABLE);
     }
@@ -266,12 +263,9 @@ class OrderServiceTest {
     @Test
     void invalidRateFromExchangeReturns503() {
         when(orderRepository.findByIdAndIdAccount(ORDER_ID, ACCOUNT)).thenReturn(Optional.of(storedOrder()));
-        // sell ausente, sell zero e corpo vazio
-        when(exchangeClient.rate("USD", "BRL", ACCOUNT))
-            .thenReturn(rate(null, "5.90"), rate("0", "5.90"), ResponseEntity.ok().build());
+        // null = resposta invalida do Exchange (sell ausente, zero ou corpo vazio; ver ExchangeLookup)
+        when(exchangeLookup.sell("USD", "BRL", ACCOUNT)).thenReturn(null);
 
-        assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "BRL"), HttpStatus.SERVICE_UNAVAILABLE);
-        assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "BRL"), HttpStatus.SERVICE_UNAVAILABLE);
         assertStatus(() -> orderService.findById(ACCOUNT, ORDER_ID, "BRL"), HttpStatus.SERVICE_UNAVAILABLE);
     }
 
@@ -291,19 +285,10 @@ class OrderServiceTest {
         return OrderItem.builder().idProduct(idProduct).quantity(quantity).build();
     }
 
-    private static ResponseEntity<ProductOut> product(String id, String price) {
-        return ResponseEntity.ok(ProductOut.builder()
+    private static ProductOut product(String id, String price) {
+        return ProductOut.builder()
             .id(id).name("Produto " + id).price(new BigDecimal(price)).unit("un")
-            .build());
-    }
-
-    private static ResponseEntity<ExchangeOut> rate(String sell, String buy) {
-        return ResponseEntity.ok(ExchangeOut.builder()
-            .sell(sell == null ? null : new BigDecimal(sell))
-            .buy(buy == null ? null : new BigDecimal(buy))
-            .date("2026-11-18 12:00:00")
-            .idAccount(ACCOUNT)
-            .build());
+            .build();
     }
 
     // erro do Product

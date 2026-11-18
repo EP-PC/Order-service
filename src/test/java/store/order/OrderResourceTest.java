@@ -39,8 +39,10 @@ import store.product.ProductOut;
  * OrderResource -> OrderService (REAL) -> OrderExceptionHandler, com mock so nas pontas
  * (banco, Product e Exchange). Cobre rotas, header id-account, status, Location e formato do JSON.
  */
+// ProductLookup/ExchangeLookup reais (sem cache: o @WebMvcTest nao carrega o CacheConfig),
+// chamando os clientes Feign mockados abaixo
 @WebMvcTest(OrderResource.class)
-@Import(OrderService.class)
+@Import({ OrderService.class, ProductLookup.class, ExchangeLookup.class })
 class OrderResourceTest {
 
     private static final String ACCOUNT = "0195ae95-5be7-7dd3-b35d-7a7d87c404fb";
