@@ -19,6 +19,9 @@ spec:
             imagePullPolicy: Always
             ports:
               - containerPort: 8080
+              # metricas do Prometheus (bottleneck 2): fora do Service, so para scrape interno
+              - containerPort: 8081
+                name: metrics
             # o site da disciplina pede que as probes chamem GET /<servico>/health-check (200 enquanto
             # o servico esta de pe, sem expor nada interno). Sem probe, o pod novo seria dado como
             # pronto assim que o container subisse e o antigo cairia: 503 nos segundos de boot do

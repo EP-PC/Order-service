@@ -74,6 +74,24 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Bottleneck 2 (observabilidade): metricas no formato do Prometheus (actuator + micrometer)
+             e metricas das chamadas Feign ao Product e ao Exchange -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.github.openfeign</groupId>
+            <artifactId>feign-micrometer</artifactId>
+        </dependency>
+
         <!-- Contrato do proprio servico: OrderController, OrderIn, OrderOut... -->
         <dependency>
             <groupId>store</groupId>

@@ -46,3 +46,22 @@ spring:
     properties:
       hibernate:
         default_schema: orders
+
+# Bottleneck 2 (observabilidade): metricas para o Prometheus em GET :8081/actuator/prometheus.
+# Porta separada de proposito: o gateway so encaminha /orders/** para a 8080, entao as metricas
+# nunca ficam acessiveis de fora; so o Prometheus (rede interna) le a 8081.
+management:
+  server:
+    port: ${MANAGEMENT_PORT:8081}
+  endpoints:
+    web:
+      exposure:
+        include: prometheus
+  metrics:
+    # histograma de latencia por endpoint e por chamada Feign: permite calcular p95/p99 no Prometheus
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true
+    tags:
+      application: order
