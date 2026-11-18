@@ -146,8 +146,9 @@ kubectl port-forward svc/order 8082:8080
 curl -H 'id-account: 0195ae95-5be7-7dd3-b35d-7a7d87c404fb' http://localhost:8082/orders
 ```
 
-Igual ao product: `readinessProbe` TCP na 8080 (o pod só recebe tráfego quando o Spring terminou
-de subir), requests/limits de 256Mi–512Mi e `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=50`.
+`readinessProbe` `httpGet` em `/orders/health-check` (o site da disciplina pede que as probes
+chamem o health-check do serviço; o pod só recebe tráfego quando o Spring terminou de subir),
+requests/limits de 256Mi–512Mi e `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=50`, como no product.
 
 ## CI/CD (Jenkins)
 
