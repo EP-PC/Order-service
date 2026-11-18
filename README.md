@@ -134,6 +134,59 @@ No Redis: 87 hits e 3 misses (2 produtos + 1 cotação). A média com cache incl
 requisição (cache vazio + aquecimento da JVM). Com o Redis desligado, as mesmas requisições
 continuaram respondendo 200/201 (sem cache, ~0,5 s a mais pelo timeout do Redis).
 
+## Bottleneck 2: observabilidade (Prometheus + Grafana)
+
+**Problema.** Sem métricas, não dá para saber onde o order gasta tempo, quantas chamadas faz ao
+Product e ao Exchange, se o cache está acertando ou se o pool do banco está no limite. As
+medições do bottleneck 1 precisaram de scripts feitos à mão.
+
+**Solução.**
+
+- **No order:** `spring-boot-starter-actuator` + `micrometer-registry-prometheus` +
+  `feign-micrometer`. As métricas ficam em `GET :8081/actuator/prometheus`, numa **porta de
+  management separada**: o gateway só encaminha `/orders/**` para a 8080, então elas nunca ficam
+  acessíveis de fora (pela 8080, `/actuator/prometheus` responde 404). Histogramas de latência
+  ligados para as rotas (`http.server.requests`) e para as chamadas Feign (`http.client.requests`),
+  o que permite calcular p95/p99. Todas as métricas levam o rótulo `application="order"`.
+- **No store-pma:** Prometheus (coleta a cada 5 s) e Grafana no profile `observability` do
+  `api/compose.yaml` (só sobem quando pedidos), com a fonte de dados e o painel **Store / Order**
+  provisionados por arquivo (`api/observability/`), sem configurar nada na tela.
+
+| Painel | Métrica |
+|---|---|
+| Requisições/s, erros (4xx+5xx), latência p95 | `http_server_requests_seconds_*` por rota e status |
+| Chamadas ao Product e ao Exchange e latência p95 | `http_client_requests_seconds_*` por `clientName` (Feign) |
+| Acerto do cache (bottleneck 1) | `cache_gets_total` por cache e resultado (hit/miss) |
+| Conexões ativas no pool do banco | `hikaricp_connections_active` |
+| Heap da JVM | `jvm_memory_used_bytes{area="heap"}` |
+
+```bash
+cd store-pma/api
+docker compose --profile observability up --build -d
+# Grafana: http://localhost:3000 (painel Store / Order, sem login)
+# Prometheus: http://localhost:9090
+```
+
+**Resultado** (90 s de tráfego misto contra o order, 4 clientes simultâneos, cerca de 5.500
+requisições; Exchange simulado com 300 ms de latência; números lidos no Prometheus):
+
+| Medida | Valor |
+|---|---|
+| `GET /orders` | p50 3,8 ms / p95 10,1 ms |
+| `POST /orders` | p50 3,9 ms / p95 11,9 ms |
+| `GET /orders/{id}` (com e sem `currency`) | p50 2,4 ms / **p95 284 ms** |
+| Acerto do cache | `products` **96,1%**, `rates` 83,8% |
+| Chamadas ao Product | 173 para cerca de 2.400 pedidos (o resto saiu do cache) |
+| Conexões ativas no pool do banco | máximo 2 (de 10) |
+| Heap da JVM | máximo 104 MB |
+
+**O que o painel mostrou.** O p95 do `GET /orders/{id}` (284 ms) ficou muito acima do p50
+(2,4 ms). O painel de chamadas Feign explica: quase todas as chamadas ao Exchange vieram de
+pedidos com moeda **inválida** (`?currency=XYZ`), porque o cache, de propósito, não guarda erros;
+cada uma paga a latência do Exchange. As conversões válidas (`BRL`) saem do cache. Próximo passo
+possível: guardar também "moeda não suportada" no cache por alguns minutos. O pool do banco nunca
+passou de 2 conexões ativas, o que confirma que o banco não é o gargalo nesse cenário.
+
 ## Banco
 
 Schema `orders` (Flyway, `src/main/resources/db/migration`):
@@ -166,7 +219,8 @@ de Postgres, Redis nem rede, e rodam no Jenkins.
 ## Kubernetes
 
 Manifestos em `k8s/k8s.yaml`: Deployment + Service `ClusterIP` 8080 com o nome `order`, e o
-Redis do cache (`order-redis`, `ClusterIP` 6379, `maxmemory` 96 MB com descarte LRU). Pré-requisito:
+Redis do cache (`order-redis`, `ClusterIP` 6379, `maxmemory` 96 MB com descarte LRU). O container
+também abre a porta 8081 (métricas do Prometheus), que fica fora do Service. Pré-requisito:
 o Postgres do repo root já aplicado (`postgres-configmap`, `postgres-secrets` e Service `postgres`).
 O order não tem segredo próprio: usa só as credenciais do banco.
 
