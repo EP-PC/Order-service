@@ -2,8 +2,7 @@ pipeline {
     agent any
     environment {
         SERVICE = 'order'
-        // TROCAR pelo seu usuario do Docker Hub antes do primeiro build (e a imagem no k8s/k8s.yaml)
-        NAME = "SEU_USUARIO_DOCKERHUB/${env.SERVICE}"
+        NAME = "enzoperego/${env.SERVICE}"
     }
     stages {
         stage('Dependencies') {

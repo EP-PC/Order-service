@@ -131,13 +131,16 @@ Manifestos em `k8s/k8s.yaml` (Deployment + Service `ClusterIP` 8080, nome `order
 o Postgres do repo root já aplicado (`postgres-configmap`, `postgres-secrets` e Service `postgres`).
 O order não tem segredo próprio: usa só as credenciais do banco.
 
-> **Antes do primeiro deploy:** troque `SEU_USUARIO_DOCKERHUB` pelo usuário do Docker Hub no
-> `k8s/k8s.yaml` e no `Jenkinsfile`, e publique a imagem com a tag usada no manifesto.
+Imagem no Docker Hub: [`enzoperego/order`](https://hub.docker.com/r/enzoperego/order). A tag do
+manifesto é o commit do código. A imagem é publicada para **linux/amd64 e linux/arm64**: um
+`docker build` simples num Mac M1/M2 gera só arm64, que não roda nos nós amd64 do EKS.
 
 ```bash
 mvn package
-docker build -t <usuario>/order:<tag> -t <usuario>/order:latest .
-docker push <usuario>/order:<tag>
+docker buildx create --use --name order-multi --driver docker-container
+docker buildx build --platform linux/amd64,linux/arm64 --push \
+  -t enzoperego/order:<commit> -t enzoperego/order:latest .
+docker buildx rm order-multi
 kubectl apply -f k8s/k8s.yaml
 kubectl port-forward svc/order 8082:8080
 curl -H 'id-account: 0195ae95-5be7-7dd3-b35d-7a7d87c404fb' http://localhost:8082/orders
@@ -154,7 +157,7 @@ Estágios do `Jenkinsfile`:
 2. `Build`: `mvn -B clean package` **com os testes** (diferente dos outros serviços, que usam
    `-DskipTests`): um teste falhando para o pipeline antes de publicar a imagem. O relatório
    aparece na página do build (plugin JUnit).
-3. `Build & Push Image`: publica `<usuario>/order:latest` e `<usuario>/order:<BUILD_ID>`
+3. `Build & Push Image`: publica `enzoperego/order:latest` e `enzoperego/order:<BUILD_ID>`
    (linux/amd64 e linux/arm64) no Docker Hub.
 4. `Deploy to EKS`: igual ao do product (`kubectl set image` + `rollout status` no cluster
    `eks-store`; pula sem falhar se o cluster estiver desligado).

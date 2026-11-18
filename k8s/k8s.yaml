@@ -14,8 +14,8 @@ spec:
     spec:
       containers:
           - name: order
-            # TROCAR SEU_USUARIO_DOCKERHUB pelo usuario do Docker Hub; a tag e o commit do codigo
-            image: SEU_USUARIO_DOCKERHUB/order:7d48eb9
+            # a tag e o commit do codigo (imagem publicada para linux/amd64 e linux/arm64)
+            image: enzoperego/order:b22c4dd
             imagePullPolicy: Always
             ports:
               - containerPort: 8080
