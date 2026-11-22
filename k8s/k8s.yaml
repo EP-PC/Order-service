@@ -15,7 +15,7 @@ spec:
       containers:
           - name: order
             # a tag e o commit do codigo (imagem publicada para linux/amd64 e linux/arm64)
-            image: enzoperego/order:1eb5bd1
+            image: enzoperego/order:9b0b3b4
             imagePullPolicy: Always
             ports:
               - containerPort: 8080
